@@ -158,18 +158,6 @@
             <artifactId>spring-boot-starter-webflux</artifactId>
         </dependency>
 
-        <!-- OpenTelemetry SDK + OTLP exporter for trace export.
-             In OTel 1.40+, OtlpHttpSpanExporter lives in the unified opentelemetry-exporter-otlp
-             artifact (HTTP sender is loaded via SPI from sender-okhttp). -->
-        <dependency>
-            <groupId>io.opentelemetry</groupId>
-            <artifactId>opentelemetry-sdk</artifactId>
-        </dependency>
-        <dependency>
-            <groupId>io.opentelemetry</groupId>
-            <artifactId>opentelemetry-exporter-otlp</artifactId>
-        </dependency>
-
         <!-- Lombok for boilerplate reduction in examples -->
         <dependency>
             <groupId>org.projectlombok</groupId>

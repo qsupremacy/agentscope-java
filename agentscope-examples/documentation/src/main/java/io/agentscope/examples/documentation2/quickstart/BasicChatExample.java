@@ -21,14 +21,6 @@ import io.agentscope.core.message.Msg;
 import io.agentscope.core.message.UserMessage;
 import io.agentscope.core.tool.Toolkit;
 import io.agentscope.core.tracing.OtelTracingMiddleware;
-import io.opentelemetry.api.common.AttributeKey;
-import io.opentelemetry.api.common.Attributes;
-import io.opentelemetry.exporter.otlp.http.trace.OtlpHttpSpanExporter;
-import io.opentelemetry.sdk.OpenTelemetrySdk;
-import io.opentelemetry.sdk.resources.Resource;
-import io.opentelemetry.sdk.trace.SdkTracerProvider;
-import io.opentelemetry.sdk.trace.export.SimpleSpanProcessor;
-import io.opentelemetry.sdk.trace.export.SpanExporter;
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
 
@@ -41,31 +33,47 @@ import java.io.InputStreamReader;
  *       the provider and reads API key from env)</li>
  *   <li>Interactive streaming chat via {@code streamEvents()}</li>
  *   <li>Incremental text output using {@link TextBlockDeltaEvent}</li>
- *   <li>Wiring OpenTelemetry tracing via {@link OtelTracingMiddleware} and the OTLP HTTP
- *       exporter (default endpoint {@code http://localhost:4318})</li>
+ *   <li>Wiring OpenTelemetry tracing via {@link OtelTracingMiddleware} alongside the official
+ *       OpenTelemetry Java Agent — the agent owns the SDK, OTLP exporter, and HTTP/gRPC/DB
+ *       instrumentation; this class only adds the AgentScope business-layer middleware</li>
  * </ul>
  *
  * <p>Spans produced: {@code invoke_agent Assistant}, {@code chat <modelName>} (per model call),
- * {@code execute_tool <name>} (per tool call). Reactor context is propagated by
- * {@code ContextPropagationOperator}, which the middleware registers on first use.
+ * {@code execute_tool <name>} (per tool call). The Java Agent contributes HTTP-client spans
+ * (OkHttp → DashScope) underneath; both share the same {@code GlobalOpenTelemetry} so the
+ * trace tree is joined automatically. Reactor context propagation is supplied by
+ * {@code ContextPropagationOperator}, registered by the middleware on first use.
  *
- * <p><b>Run:</b>
+ * <p><b>Run with the OpenTelemetry Java Agent:</b>
  * <pre>
- *   # 1. Start a collector that listens on :4318 (HTTP), e.g.:
- *   docker run --rm -p 4318:4318 -p 4317:4317 \
- *     -v "$PWD/otel-collector.yaml":/etc/otelcol/config.yaml \
- *     otel/opentelemetry-collector-contrib:0.96.0
+ *   # 0. One-off: download the agent jar into the project root
+ *   curl -L -O \
+ *     https://github.com/open-telemetry/opentelemetry-java-instrumentation/releases/latest/download/opentelemetry-javaagent.jar
  *
- *   # 2. Set the key and run:
+ *   # 1. Start an OTel collector that listens on :4317 (gRPC) and :4318 (HTTP)
+ *   docker run -d --name otel-collector \
+ *     -p 4317:4317 -p 4318:4318 \
+ *     -v "$PWD/otel-collector.yaml":/etc/otelcol/config.yaml \
+ *     otel/opentelemetry-collector-contrib:0.114.0
+ *
+ *   # 2. Set the API key and exporter endpoint (gRPC recommended)
  *   export DASHSCOPE_API_KEY=your_key
- *   mvn exec:java -pl agentscope-examples/documentation \
- *       -Dexec.mainClass=io.agentscope.examples.documentation2.quickstart.BasicChatExample
+ *   export OTEL_SERVICE_NAME=basic-chat-example
+ *   export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317
+ *   export OTEL_EXPORTER_OTLP_PROTOCOL=grpc
+ *
+ *   # 3. Run via mvn (javaagent flag passed through exec:exec)
+ *   mvn -pl agentscope-examples/documentation exec:exec \
+ *       -Dexec.executable=java \
+ *       -Dexec.args="-javaagent:$(pwd)/opentelemetry-javaagent.jar -classpath %classpath io.agentscope.examples.documentation2.quickstart.BasicChatExample"
+ *
+ *   # Equivalent direct java invocation:
+ *   # java -javaagent:opentelemetry-javaagent.jar \
+ *   #      -cp "$(mvn -q dependency:build-classpath -Dmdep.outputFile=/dev/stdout -pl agentscope-examples/documentation):agentscope-examples/documentation/target/classes" \
+ *   #      io.agentscope.examples.documentation2.quickstart.BasicChatExample
  * </pre>
  */
 public class BasicChatExample {
-
-    private static final String OTLP_ENDPOINT = "http://localhost:4318/v1/traces";
-    private static final String SERVICE_NAME = "basic-chat-example";
 
     public static void main(String[] args) throws Exception {
         String apiKey = System.getenv("DASHSCOPE_API_KEY");
@@ -76,14 +84,16 @@ public class BasicChatExample {
             System.exit(1);
         }
 
-        OpenTelemetrySdk otelSdk = initOpenTelemetry(OTLP_ENDPOINT);
-        Runtime.getRuntime().addShutdownHook(new Thread(otelSdk::close));
-
         System.out.println("\n" + "=".repeat(60));
-        System.out.println("Basic Chat Example (with OpenTelemetry tracing)");
+        System.out.println("Basic Chat Example (OpenTelemetry via Java Agent)");
         System.out.println("=".repeat(60));
-        System.out.println("OTLP endpoint: " + OTLP_ENDPOINT);
-        System.out.println("A simple interactive chat with streaming output.");
+        System.out.println(
+                "OTel endpoint: "
+                        + System.getenv()
+                                .getOrDefault("OTEL_EXPORTER_OTLP_ENDPOINT", "(agent default)"));
+        System.out.println(
+                "OTel service:  "
+                        + System.getenv().getOrDefault("OTEL_SERVICE_NAME", "(agent default)"));
         System.out.println("Type 'exit' to quit.\n");
 
         ReActAgent agent =
@@ -122,25 +132,5 @@ public class BasicChatExample {
                     .blockLast();
             System.out.println("\n");
         }
-    }
-
-    private static OpenTelemetrySdk initOpenTelemetry(String otlpEndpoint) {
-        Resource resource =
-                Resource.getDefault()
-                        .merge(
-                                Resource.create(
-                                        Attributes.of(
-                                                AttributeKey.stringKey("service.name"),
-                                                SERVICE_NAME)));
-        SpanExporter otlpExporter =
-                OtlpHttpSpanExporter.builder().setEndpoint(otlpEndpoint).build();
-        SdkTracerProvider tracerProvider =
-                SdkTracerProvider.builder()
-                        .addSpanProcessor(SimpleSpanProcessor.create(otlpExporter))
-                        .setResource(resource)
-                        .build();
-        return OpenTelemetrySdk.builder()
-                .setTracerProvider(tracerProvider)
-                .buildAndRegisterGlobal();
     }
 }
