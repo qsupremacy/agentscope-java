@@ -5,7 +5,7 @@
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *      http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -16,33 +16,45 @@
 package io.agentscope.examples.documentation2.quickstart;
 
 import io.agentscope.core.ReActAgent;
+import io.agentscope.core.agent.RuntimeContext;
 import io.agentscope.core.event.TextBlockDeltaEvent;
-import io.agentscope.core.message.Msg;
 import io.agentscope.core.message.UserMessage;
+import io.agentscope.core.model.Model;
 import io.agentscope.core.tool.Toolkit;
 import io.agentscope.core.tracing.OtelTracingMiddleware;
-import java.io.BufferedReader;
-import java.io.InputStreamReader;
+import io.agentscope.extensions.model.dashscope.DashScopeChatModel;
+import org.springframework.beans.factory.InitializingBean;
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.http.MediaType;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RestController;
+import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
+import reactor.core.scheduler.Schedulers;
 
 /**
- * BasicChatExample - The simplest Agent conversation example.
+ * BasicChatExample - The simplest Agent exposed as a Spring Web server.
  *
  * <p>Demonstrates:
  * <ul>
- *   <li>Creating an agent with {@code model("dashscope:qwen-plus")} (ModelRegistry auto-resolves
- *       the provider and reads API key from env)</li>
- *   <li>Interactive streaming chat via {@code streamEvents()}</li>
- *   <li>Incremental text output using {@link TextBlockDeltaEvent}</li>
- *   <li>Wiring OpenTelemetry tracing via {@link OtelTracingMiddleware} alongside the official
- *       OpenTelemetry Java Agent — the agent owns the SDK, OTLP exporter, and HTTP/gRPC/DB
- *       instrumentation; this class only adds the AgentScope business-layer middleware</li>
+ *   <li>Bootstrapping AgentScope on Spring WebFlux with a single {@code @SpringBootApplication}
+ *       class and a nested {@code @RestController}</li>
+ *   <li>Shared {@link Model} bean (the HTTP client is safe to share across concurrent requests)
+ *       paired with per-request {@link ReActAgent} instances — required because ReActAgent is
+ *       not thread-safe (see {@code ReActAgent} Javadoc)</li>
+ *   <li>Two response shapes: synchronous JSON ({@code POST /chat}) and Server-Sent Events
+ *       ({@code POST /chat/stream}), both driven by {@code agent.streamEvents(...)}</li>
+ *   <li>OpenTelemetry tracing via {@link OtelTracingMiddleware} (one per request) plus the
+ *       official OpenTelemetry Java Agent — the agent supplies the SDK and OTLP exporter; the
+ *       middleware produces the AgentScope business-layer spans</li>
  * </ul>
  *
- * <p>Spans produced: {@code invoke_agent Assistant}, {@code chat <modelName>} (per model call),
- * {@code execute_tool <name>} (per tool call). The Java Agent contributes HTTP-client spans
- * (OkHttp → DashScope) underneath; both share the same {@code GlobalOpenTelemetry} so the
- * trace tree is joined automatically. Reactor context propagation is supplied by
- * {@code ContextPropagationOperator}, registered by the middleware on first use.
+ * <p>Spans produced: {@code invoke_agent WebAssistant}, {@code chat qwen-plus} (per model call),
+ * and HTTP client spans from the Java Agent. All share the same trace id via
+ * {@code GlobalOpenTelemetry}.
  *
  * <p><b>Run with the OpenTelemetry Java Agent:</b>
  * <pre>
@@ -62,75 +74,119 @@ import java.io.InputStreamReader;
  *   export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317
  *   export OTEL_EXPORTER_OTLP_PROTOCOL=grpc
  *
- *   # 3. Run via mvn (javaagent flag passed through exec:exec)
- *   mvn -pl agentscope-examples/documentation exec:exec \
- *       -Dexec.executable=java \
- *       -Dexec.args="-javaagent:$(pwd)/opentelemetry-javaagent.jar -classpath %classpath io.agentscope.examples.documentation2.quickstart.BasicChatExample"
+ *   # 3. Run via run.sh (which attaches the javaagent via spring-boot:run)
+ *   bash /data/disk/agentscope-java/agentscope-examples/run.sh
  *
- *   # Equivalent direct java invocation:
- *   # java -javaagent:opentelemetry-javaagent.jar \
- *   #      -cp "$(mvn -q dependency:build-classpath -Dmdep.outputFile=/dev/stdout -pl agentscope-examples/documentation):agentscope-examples/documentation/target/classes" \
- *   #      io.agentscope.examples.documentation2.quickstart.BasicChatExample
+ *   # 4. Exercise the endpoints
+ *   curl localhost:8080/health
+ *   curl -X POST localhost:8080/chat \
+ *        -H 'Content-Type: application/json' \
+ *        -d '{"message":"Hello","userId":"u1","sessionId":"s1"}'
+ *   curl -N -X POST localhost:8080/chat/stream \
+ *        -H 'Content-Type: application/json' \
+ *        -d '{"message":"Tell me a story"}'
  * </pre>
  */
+@SpringBootApplication
 public class BasicChatExample {
 
-    public static void main(String[] args) throws Exception {
-        String apiKey = System.getenv("DASHSCOPE_API_KEY");
-        if (apiKey == null || apiKey.isBlank()) {
-            System.err.println("Error: DASHSCOPE_API_KEY environment variable not set.");
-            System.err.println("Get your API key from: https://dashscope.aliyun.com");
-            System.err.println("Then set it with: export DASHSCOPE_API_KEY=your_api_key");
-            System.exit(1);
+    public static void main(String[] args) {
+        SpringApplication.run(BasicChatExample.class, args);
+    }
+
+    /** REST controller exposing chat endpoints over HTTP. */
+    @RestController
+    public static class ChatController implements InitializingBean {
+
+        private Model model;
+
+        @Override
+        public void afterPropertiesSet() {
+            String apiKey = System.getenv("DASHSCOPE_API_KEY");
+            if (apiKey == null || apiKey.isBlank()) {
+                throw new IllegalStateException(
+                        "DASHSCOPE_API_KEY environment variable is required");
+            }
+            this.model =
+                    DashScopeChatModel.builder().apiKey(apiKey).modelName("qwen-plus").stream(true)
+                            .build();
+
+            System.out.println("\n=== BasicChatExample (Spring Web) Started ===");
+            System.out.println("Server running at: http://localhost:8080");
+            System.out.println("\nTry:");
+            System.out.println("  curl localhost:8080/health");
+            System.out.println(
+                    "  curl -X POST localhost:8080/chat"
+                            + " -H 'Content-Type: application/json'"
+                            + " -d '{\"message\":\"Hello\"}'");
+            System.out.println(
+                    "  curl -N -X POST localhost:8080/chat/stream"
+                            + " -H 'Content-Type: application/json'"
+                            + " -d '{\"message\":\"Tell me a story\"}'");
+            System.out.println("\nPress Ctrl+C to stop.\n");
         }
 
-        System.out.println("\n" + "=".repeat(60));
-        System.out.println("Basic Chat Example (OpenTelemetry via Java Agent)");
-        System.out.println("=".repeat(60));
-        System.out.println(
-                "OTel endpoint: "
-                        + System.getenv()
-                                .getOrDefault("OTEL_EXPORTER_OTLP_ENDPOINT", "(agent default)"));
-        System.out.println(
-                "OTel service:  "
-                        + System.getenv().getOrDefault("OTEL_SERVICE_NAME", "(agent default)"));
-        System.out.println("Type 'exit' to quit.\n");
+        public record ChatRequest(String message, String userId, String sessionId) {}
 
-        ReActAgent agent =
-                ReActAgent.builder()
-                        .name("Assistant")
-                        .sysPrompt("You are a helpful AI assistant. Be friendly and concise.")
-                        .model("dashscope:qwen-plus")
-                        .toolkit(new Toolkit())
-                        .middleware(new OtelTracingMiddleware())
-                        .build();
+        public record ChatResponse(String reply, String replyId) {}
 
-        BufferedReader reader = new BufferedReader(new InputStreamReader(System.in));
+        /** Liveness probe. */
+        @GetMapping("/health")
+        public String health() {
+            return "OK";
+        }
 
-        while (true) {
-            System.out.print("You: ");
-            String input = reader.readLine();
+        /**
+         * Synchronous chat — returns the full reply as JSON once the agent finishes.
+         */
+        @PostMapping(value = "/chat", produces = MediaType.APPLICATION_JSON_VALUE)
+        public Mono<ChatResponse> chat(@RequestBody ChatRequest req) {
+            ReActAgent agent = newRequestAgent();
+            RuntimeContext ctx = buildRuntimeContext(req);
 
-            if (input == null || input.trim().equalsIgnoreCase("exit")) {
-                System.out.println("\nGoodbye!");
-                break;
-            }
-            if (input.isBlank()) {
-                continue;
-            }
+            return agent.call(req.message(), ctx)
+                    .map(reply -> new ChatResponse(reply.getTextContent(), null));
+        }
 
-            Msg userMsg = new UserMessage(input.trim());
+        /**
+         * Streaming chat — emits one text delta per Server-Sent Event.
+         */
+        @PostMapping(value = "/chat/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+        public Flux<String> chatStream(@RequestBody ChatRequest req) {
+            ReActAgent agent = newRequestAgent();
+            RuntimeContext ctx = buildRuntimeContext(req);
 
-            System.out.print("\nAssistant: ");
-            agent.streamEvents(userMsg)
-                    .doOnNext(
-                            event -> {
-                                if (event instanceof TextBlockDeltaEvent e) {
-                                    System.out.print(e.getDelta());
-                                }
-                            })
-                    .blockLast();
-            System.out.println("\n");
+            return agent.streamEvents(new UserMessage(req.message()), ctx)
+                    .subscribeOn(Schedulers.boundedElastic())
+                    .filter(event -> event instanceof TextBlockDeltaEvent)
+                    .map(event -> ((TextBlockDeltaEvent) event).getDelta());
+        }
+
+        // ------------------------------------------------------------------
+        // helpers
+        // ------------------------------------------------------------------
+
+        /**
+         * Builds a fresh {@link ReActAgent} for this request. ReActAgent is not thread-safe —
+         * creating one per request is the recommended pattern (see {@code ReActAgent} Javadoc
+         * and {@code StreamingWebExample}). The shared {@link Model} bean is safe to reuse across
+         * agents; {@link Toolkit} is deep-copied at {@code build()} time.
+         */
+        private ReActAgent newRequestAgent() {
+            return ReActAgent.builder()
+                    .name("WebAssistant")
+                    .sysPrompt("You are a helpful AI assistant. Be friendly and concise.")
+                    .model(model)
+                    .toolkit(new Toolkit())
+                    .middleware(new OtelTracingMiddleware())
+                    .build();
+        }
+
+        private static RuntimeContext buildRuntimeContext(ChatRequest req) {
+            return RuntimeContext.builder()
+                    .userId(req.userId() != null ? req.userId() : "anonymous")
+                    .sessionId(req.sessionId() != null ? req.sessionId() : "default")
+                    .build();
         }
     }
 }

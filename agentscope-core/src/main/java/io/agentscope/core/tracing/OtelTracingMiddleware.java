@@ -102,6 +102,9 @@ public class OtelTracingMiddleware implements MiddlewareBase {
      *   <li>{@code gen_ai.resource.id} — tenant / project identifier, sourced from the
      *       {@code AGENTSCOPE_RESOURCE_ID} env var (with a hard-coded fallback for the default
      *       Huawei Cloud APM tenant). Lets backends route spans to the right workspace.</li>
+     *   <li>{@code gen_ai.resource.type} — fixed string {@code "agent"}, identifies the
+     *       emitting component as an AgentScope agent (vs. a model, tool, or other GenAI
+     *       resource). Lets backends filter or attribute by source component.</li>
      * </ul>
      */
     private static void setCommonAttributes(Span span) {
@@ -111,6 +114,7 @@ public class OtelTracingMiddleware implements MiddlewareBase {
                 firstNonBlank(
                         System.getenv("AGENTSCOPE_RESOURCE_ID"),
                         "57e005b686cb405ea0c995d1b5961dac"));
+        span.setAttribute("gen_ai.resource.type", "agent");
     }
 
     private static String firstNonBlank(String preferred, String fallback) {

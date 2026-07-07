@@ -165,4 +165,18 @@
             <optional>true</optional>
         </dependency>
     </dependencies>
+
+    <build>
+        <plugins>
+            <!-- Spring Boot fat JAR + spring-boot:run support -->
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+                <version>${spring.boot.version}</version>
+                <configuration>
+                    <mainClass>io.agentscope.examples.documentation2.quickstart.BasicChatExample</mainClass>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
 </project>
