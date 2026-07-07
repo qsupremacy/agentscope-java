@@ -88,3 +88,9 @@ logs/
 
 ## oh-my-claudecode
 .omc/
+
+## Local launcher scripts (kept on disk, not tracked in git).
+# agentscope-examples/run.sh is repo-specific, derives paths from $BASH_SOURCE,
+# and may contain local credential references or per-environment tweaks that
+# would leak / differ across clones. Re-create from run.md when onboarding.
+agentscope-examples/run.sh
