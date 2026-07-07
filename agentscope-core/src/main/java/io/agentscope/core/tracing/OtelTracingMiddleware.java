@@ -72,6 +72,7 @@ import reactor.util.context.ContextView;
 public class OtelTracingMiddleware implements MiddlewareBase {
 
     private static final String INSTRUMENTATION_NAME = "io.agentscope";
+    private static final String INSTRUMENTATION_VERSION = "2.0.0-SNAPSHOT";
 
     private static volatile boolean hookRegistered = false;
 
@@ -87,7 +88,33 @@ public class OtelTracingMiddleware implements MiddlewareBase {
     }
 
     private Tracer getTracer() {
-        return GlobalOpenTelemetry.getTracer(INSTRUMENTATION_NAME);
+        return GlobalOpenTelemetry.getTracer(INSTRUMENTATION_NAME, INSTRUMENTATION_VERSION);
+    }
+
+    /**
+     * Attach attributes that should appear on every span produced by this middleware. Called
+     * after {@code spanBuilder.startSpan()} so the writes hit the writable span view.
+     *
+     * <p>Currently emits:
+     * <ul>
+     *   <li>{@code agentscope.runtime.java} — JVM version (from {@code java.version} system
+     *       property), lets backends slice traces by Java runtime.</li>
+     *   <li>{@code gen_ai.resource.id} — tenant / project identifier, sourced from the
+     *       {@code AGENTSCOPE_RESOURCE_ID} env var (with a hard-coded fallback for the default
+     *       Huawei Cloud APM tenant). Lets backends route spans to the right workspace.</li>
+     * </ul>
+     */
+    private static void setCommonAttributes(Span span) {
+        span.setAttribute("agentscope.runtime.java", System.getProperty("java.version", "unknown"));
+        span.setAttribute(
+                "gen_ai.resource.id",
+                firstNonBlank(
+                        System.getenv("AGENTSCOPE_RESOURCE_ID"),
+                        "57e005b686cb405ea0c995d1b5961dac"));
+    }
+
+    private static String firstNonBlank(String preferred, String fallback) {
+        return preferred != null && !preferred.isBlank() ? preferred : fallback;
     }
 
     // ------------------------------------------------------------------
@@ -116,6 +143,7 @@ public class OtelTracingMiddleware implements MiddlewareBase {
                                             "gen_ai.request.messages.count",
                                             (long) input.msgs().size())
                                     .startSpan();
+                    setCommonAttributes(span);
 
                     Context otelCtx = span.storeInContext(parentContext);
                     AtomicReference<Boolean> ended = new AtomicReference<>(false);
@@ -188,6 +216,7 @@ public class OtelTracingMiddleware implements MiddlewareBase {
                                                     ? (long) input.tools().size()
                                                     : 0L)
                                     .startSpan();
+                    setCommonAttributes(span);
 
                     Context otelCtx = span.storeInContext(parentContext);
                     AtomicReference<Boolean> ended = new AtomicReference<>(false);
@@ -260,6 +289,7 @@ public class OtelTracingMiddleware implements MiddlewareBase {
                                                     ? (long) input.toolCalls().size()
                                                     : 0L)
                                     .startSpan();
+                    setCommonAttributes(span);
 
                     Context otelCtx = span.storeInContext(parentContext);
                     AtomicReference<Boolean> ended = new AtomicReference<>(false);
