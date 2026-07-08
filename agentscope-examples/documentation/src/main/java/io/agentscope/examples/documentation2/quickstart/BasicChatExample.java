@@ -22,6 +22,8 @@ import io.agentscope.core.message.UserMessage;
 import io.agentscope.core.model.Model;
 import io.agentscope.core.permission.PermissionContextState;
 import io.agentscope.core.permission.PermissionMode;
+import io.agentscope.core.skill.repository.AgentSkillRepository;
+import io.agentscope.core.skill.repository.ClasspathSkillRepository;
 import io.agentscope.core.tool.Toolkit;
 import io.agentscope.core.tool.mcp.McpClientBuilder;
 import io.agentscope.core.tool.mcp.McpClientWrapper;
@@ -112,6 +114,7 @@ public class BasicChatExample {
 
         private Model model;
         private Toolkit toolkit;
+        private AgentSkillRepository skillRepository;
 
         @Override
         public void afterPropertiesSet() {
@@ -141,6 +144,22 @@ public class BasicChatExample {
                 System.out.println("AMap MCP tools registered: " + this.toolkit.getToolNames());
             } else {
                 System.out.println("AMAP_API_KEY not set — running without MCP tools (chat only).");
+            }
+
+            // Skills via ClasspathSkillRepository (optional — app still works without them).
+            // Loads SKILL.md entries from src/main/resources/skills/ on the classpath.
+            // Bundled skills include `summarizer` and `data-analysis`.
+            try {
+                ClasspathSkillRepository repo = new ClasspathSkillRepository("skills");
+                if (!repo.getAllSkillNames().isEmpty()) {
+                    this.skillRepository = repo;
+                    System.out.println(
+                            "Loaded skills: " + String.join(", ", repo.getAllSkillNames()));
+                } else {
+                    System.out.println("No skills found in classpath:skills (skipping).");
+                }
+            } catch (Exception e) {
+                System.out.println("Skill repository unavailable (skipping): " + e.getMessage());
             }
 
             System.out.println("\n=== BasicChatExample (Spring Web) Started ===");
@@ -259,6 +278,7 @@ public class BasicChatExample {
                     .toolkit(toolkit != null ? toolkit : new Toolkit())
                     .permissionContext(
                             PermissionContextState.builder().mode(PermissionMode.BYPASS).build())
+                    .skillRepository(skillRepository) // may be null if no skills loaded
                     .middleware(new OtelTracingMiddleware())
                     .build();
         }
@@ -293,5 +313,8 @@ public class BasicChatExample {
                     + "不能只贴原始 JSON。\n"
                     + "6. 如果用户没指定出行方式,默认使用驾车(maps_direction_driving),"
                     + "完成后可以问用户是否也想看步行或骑行方案。\n"
-                    + "7. 对于非导航类问题(闲聊、知识问答),正常回答,不要调用任何工具。";
+                    + "7. 对于非导航类问题(闲聊、知识问答),正常回答,不要调用任何工具。\n"
+                    + "8. 看到 \"可用 skill\" 时(如 summarizer / data-analysis),"
+                    + "把用户的辅助诉求(摘要、统计分析等)交给对应 skill 处理,"
+                    + "不要绕开 skill 自己凑。";
 }
