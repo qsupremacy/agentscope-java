@@ -90,10 +90,13 @@ import reactor.core.scheduler.Schedulers;
  *   curl localhost:8080/health
  *   curl -X POST localhost:8080/chat \
  *        -H 'Content-Type: application/json' \
- *        -d '{"message":"我在上海市闵行区,想开车去人民广场,帮我规划路线","userId":"u1","sessionId":"s1"}'
+ *        -d '{"message":"从北京西直门地铁站到北京首都机场怎么去","userId":"u1","sessionId":"s1"}'
+ *   curl -X POST localhost:8080/chat \
+ *        -H 'Content-Type: application/json' \
+ *        -d '{"message":"从 121.4737,31.2304 到 121.4756,31.2244 驾车怎么走"}'
  *   curl -N -X POST localhost:8080/chat/stream \
  *        -H 'Content-Type: application/json' \
- *        -d '{"message":"从北京西站到天安门怎么走?公交"}'
+ *        -d '{"message":"从人民广场步行去陆家嘴要多久?"}'
  * </pre>
  */
 @SpringBootApplication
@@ -151,7 +154,7 @@ public class BasicChatExample {
             System.out.println(
                     "  curl -X POST localhost:8080/chat"
                             + " -H 'Content-Type: application/json'"
-                            + " -d '{\"message\":\"我在上海,想去人民广场,帮我开车规划\"}'");
+                            + " -d '{\"message\":\"从北京西直门地铁站到北京首都机场怎么去\"}'");
             System.out.println(
                     "  curl -N -X POST localhost:8080/chat/stream"
                             + " -H 'Content-Type: application/json'"
@@ -271,23 +274,24 @@ public class BasicChatExample {
     /**
      * Chinese navigation assistant prompt ported from the Python reference
      * {@code /data/disk/agent-demo/navagent/agent.py:58-64}. It steers the LLM toward the
-     * navigation tools exposed by the AMap MCP server (registered at startup) and forbids it
-     * from answering navigation queries without calling a tool (which would just return a URL).
+     * navigation tools exposed by the AMap MCP server (registered at startup).
      */
     private static final String DEFAULT_SYSTEM_PROMPT =
             "你是一个专业的出行助手,可以调用高德地图 MCP 工具为用户提供驾车/步行/骑行路线规划服务。\n"
                     + "\n"
                     + "重要规则：\n"
-                    + "1. 路径规划类工具(maps_direction_driving / maps_direction_walking /"
-                    + " maps_direction_bicycling)的 origin 和 destination 都必须是 \"经度,纬度\""
-                    + " 格式的字符串(逗号分隔,经度在前)。例如:121.4737,31.2304。\n"
-                    + "2. 调用工具前必须先向用户确认或索取起终点坐标。如果用户只给了地名"
-                    + "(如\"西直门地铁站\"、\"人民广场\")没有坐标,直接回复用户:"
-                    + "请提供起点和终点的经纬度坐标(格式:经度,纬度),因为当前服务不支持地址解析。"
-                    + "不要尝试调用工具——参数格式不对会失败。\n"
-                    + "3. 拿到工具返回的路线数据后,必须用人话总结给用户:包括距离、预计时间、途经主要道路等,"
+                    + "1. 用户给的是地名(如\"西直门地铁站\"、\"人民广场\"、\"北京首都机场\")时,"
+                    + "先用 maps_geo 把每个地名解析成经纬度。maps_geo 接收一个地址列表,"
+                    + "每个返回的 location 字段就是 \"经度,纬度\" 格式的字符串。\n"
+                    + "2. 拿到坐标后再调用 maps_direction_driving / maps_direction_walking /"
+                    + " maps_direction_bicycling(origin=\"起点经纬度\", destination=\"终点经纬度\")。"
+                    + "参数格式必须是 \"经度,纬度\"(逗号分隔,经度在前)。例如:121.4737,31.2304。\n"
+                    + "3. 如果用户直接给了经纬度,跳过 maps_geo,直接调路径规划工具。\n"
+                    + "4. 如果 maps_geo 解析失败(返回空 location 或报错),告诉用户没找到,"
+                    + "请他/她换个写法或直接给经纬度,不要瞎猜坐标。\n"
+                    + "5. 拿到路径规划结果后,必须用人话总结给用户:包括距离、预计时间、途经主要道路等,"
                     + "不能只贴原始 JSON。\n"
-                    + "4. 如果用户没指定出行方式,默认使用驾车(maps_direction_driving),"
+                    + "6. 如果用户没指定出行方式,默认使用驾车(maps_direction_driving),"
                     + "完成后可以问用户是否也想看步行或骑行方案。\n"
-                    + "5. 对于非导航类问题(闲聊、知识问答),正常回答,不要调用任何工具。";
+                    + "7. 对于非导航类问题(闲聊、知识问答),正常回答,不要调用任何工具。";
 }
