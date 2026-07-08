@@ -20,7 +20,11 @@ import io.agentscope.core.agent.RuntimeContext;
 import io.agentscope.core.event.TextBlockDeltaEvent;
 import io.agentscope.core.message.UserMessage;
 import io.agentscope.core.model.Model;
+import io.agentscope.core.permission.PermissionContextState;
+import io.agentscope.core.permission.PermissionMode;
 import io.agentscope.core.tool.Toolkit;
+import io.agentscope.core.tool.mcp.McpClientBuilder;
+import io.agentscope.core.tool.mcp.McpClientWrapper;
 import io.agentscope.core.tracing.OtelTracingMiddleware;
 import io.agentscope.extensions.model.dashscope.DashScopeChatModel;
 import org.springframework.beans.factory.InitializingBean;
@@ -36,7 +40,7 @@ import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Schedulers;
 
 /**
- * BasicChatExample - The simplest Agent exposed as a Spring Web server.
+ * BasicChatExample - A navigation-capable Agent exposed as a Spring Web server.
  *
  * <p>Demonstrates:
  * <ul>
@@ -47,14 +51,18 @@ import reactor.core.scheduler.Schedulers;
  *       not thread-safe (see {@code ReActAgent} Javadoc)</li>
  *   <li>Two response shapes: synchronous JSON ({@code POST /chat}) and Server-Sent Events
  *       ({@code POST /chat/stream}), both driven by {@code agent.streamEvents(...)}</li>
+ *   <li>AMap (高德地图) MCP tools via Streamable HTTP transport — registered once at startup
+ *       on a shared {@link Toolkit} (all ~15 AMap-exposed tools; the system prompt steers the
+ *       LLM toward the navigation-specific ones)
  *   <li>OpenTelemetry tracing via {@link OtelTracingMiddleware} (one per request) plus the
  *       official OpenTelemetry Java Agent — the agent supplies the SDK and OTLP exporter; the
  *       middleware produces the AgentScope business-layer spans</li>
  * </ul>
  *
- * <p>Spans produced: {@code invoke_agent WebAssistant}, {@code chat qwen-plus} (per model call),
- * and HTTP client spans from the Java Agent. All share the same trace id via
- * {@code GlobalOpenTelemetry}.
+ * <p>Spans produced: {@code invoke_agent NavigationAssistant}, {@code chat qwen-plus} (per model
+ * call), {@code execute_tool maps_direction_driving} (per tool call), and HTTP client spans from
+ * the Java Agent (including one for the MCP call to {@code mcp.amap.com}). All share the same
+ * trace id via {@code GlobalOpenTelemetry}.
  *
  * <p><b>Run with the OpenTelemetry Java Agent:</b>
  * <pre>
@@ -68,8 +76,9 @@ import reactor.core.scheduler.Schedulers;
  *     -v "$PWD/otel-collector.yaml":/etc/otelcol/config.yaml \
  *     otel/opentelemetry-collector-contrib:0.114.0
  *
- *   # 2. Set the API key and exporter endpoint (gRPC recommended)
+ *   # 2. Set the API keys and exporter endpoint (gRPC recommended)
  *   export DASHSCOPE_API_KEY=your_key
+ *   export AMAP_API_KEY=your_amap_mcp_key      # from https://lbs.amap.com/ → MCP
  *   export OTEL_SERVICE_NAME=basic-chat-example
  *   export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317
  *   export OTEL_EXPORTER_OTLP_PROTOCOL=grpc
@@ -81,10 +90,10 @@ import reactor.core.scheduler.Schedulers;
  *   curl localhost:8080/health
  *   curl -X POST localhost:8080/chat \
  *        -H 'Content-Type: application/json' \
- *        -d '{"message":"Hello","userId":"u1","sessionId":"s1"}'
+ *        -d '{"message":"我在上海市闵行区,想开车去人民广场,帮我规划路线","userId":"u1","sessionId":"s1"}'
  *   curl -N -X POST localhost:8080/chat/stream \
  *        -H 'Content-Type: application/json' \
- *        -d '{"message":"Tell me a story"}'
+ *        -d '{"message":"从北京西站到天安门怎么走?公交"}'
  * </pre>
  */
 @SpringBootApplication
@@ -99,6 +108,7 @@ public class BasicChatExample {
     public static class ChatController implements InitializingBean {
 
         private Model model;
+        private Toolkit toolkit;
 
         @Override
         public void afterPropertiesSet() {
@@ -108,8 +118,27 @@ public class BasicChatExample {
                         "DASHSCOPE_API_KEY environment variable is required");
             }
             this.model =
-                    DashScopeChatModel.builder().apiKey(apiKey).modelName("qwen-plus").stream(true)
+                    DashScopeChatModel.builder().apiKey(apiKey).modelName("qwen-max").stream(true)
                             .build();
+
+            // AMap MCP server via Streamable HTTP (optional — app still works without it).
+            // API key is sent as a query parameter; the MCP SDK's streamableHttpTransport uses the
+            // URL path+query verbatim and does not append its own endpoint, so no path duplication.
+            String amapKey = System.getenv("AMAP_API_KEY");
+            this.toolkit = new Toolkit();
+            if (amapKey != null && !amapKey.isBlank()) {
+                System.out.println("Connecting to AMap MCP server via Streamable HTTP...");
+                McpClientWrapper mcpClient =
+                        McpClientBuilder.create("amap-maps")
+                                .streamableHttpTransport("https://mcp.amap.com/mcp")
+                                .queryParam("key", amapKey)
+                                .buildAsync()
+                                .block();
+                this.toolkit.registerMcpClient(mcpClient).block();
+                System.out.println("AMap MCP tools registered: " + this.toolkit.getToolNames());
+            } else {
+                System.out.println("AMAP_API_KEY not set — running without MCP tools (chat only).");
+            }
 
             System.out.println("\n=== BasicChatExample (Spring Web) Started ===");
             System.out.println("Server running at: http://localhost:8080");
@@ -119,6 +148,10 @@ public class BasicChatExample {
                     "  curl -X POST localhost:8080/chat"
                             + " -H 'Content-Type: application/json'"
                             + " -d '{\"message\":\"Hello\"}'");
+            System.out.println(
+                    "  curl -X POST localhost:8080/chat"
+                            + " -H 'Content-Type: application/json'"
+                            + " -d '{\"message\":\"我在上海,想去人民广场,帮我开车规划\"}'");
             System.out.println(
                     "  curl -N -X POST localhost:8080/chat/stream"
                             + " -H 'Content-Type: application/json'"
@@ -138,14 +171,50 @@ public class BasicChatExample {
 
         /**
          * Synchronous chat — returns the full reply as JSON once the agent finishes.
+         *
+         * <p>Uses {@code streamEvents(...)} under the hood and accumulates {@link
+         * TextBlockDeltaEvent} deltas into a single string. This is more robust than
+         * {@code agent.call(...)} + {@code getTextContent()}, which returns "" when the LLM
+         * produces tool calls or thinking without an accompanying final text block (the
+         * returned Msg may then have only {@code ToolUseBlock}/{@code ThinkingBlock} content
+         * and no {@code TextBlock}). Streaming collects whatever the model emits.
+         *
+         * <p>Falls back to any text inside {@code ToolResultBlock}s if no deltas were emitted.
          */
         @PostMapping(value = "/chat", produces = MediaType.APPLICATION_JSON_VALUE)
         public Mono<ChatResponse> chat(@RequestBody ChatRequest req) {
             ReActAgent agent = newRequestAgent();
             RuntimeContext ctx = buildRuntimeContext(req);
 
-            return agent.call(req.message(), ctx)
-                    .map(reply -> new ChatResponse(reply.getTextContent(), null));
+            StringBuilder text = new StringBuilder();
+            StringBuilder diag = new StringBuilder();
+            final boolean[] toolCalled = {false};
+
+            return agent.streamEvents(new UserMessage(req.message()), ctx)
+                    .subscribeOn(Schedulers.boundedElastic())
+                    .doOnNext(
+                            event -> {
+                                diag.append(event.getClass().getSimpleName()).append(" | ");
+                                if (event instanceof TextBlockDeltaEvent delta) {
+                                    text.append(delta.getDelta());
+                                } else if (event
+                                        instanceof io.agentscope.core.event.ToolCallStartEvent) {
+                                    toolCalled[0] = true;
+                                }
+                            })
+                    .collectList()
+                    .map(
+                            events -> {
+                                String reply = text.toString();
+                                System.err.println(
+                                        "[DEBUG chat] toolCalled="
+                                                + toolCalled[0]
+                                                + " deltaLen="
+                                                + reply.length()
+                                                + " events="
+                                                + diag);
+                                return new ChatResponse(reply, null);
+                            });
         }
 
         /**
@@ -169,15 +238,24 @@ public class BasicChatExample {
         /**
          * Builds a fresh {@link ReActAgent} for this request. ReActAgent is not thread-safe —
          * creating one per request is the recommended pattern (see {@code ReActAgent} Javadoc
-         * and {@code StreamingWebExample}). The shared {@link Model} bean is safe to reuse across
-         * agents; {@link Toolkit} is deep-copied at {@code build()} time.
+         * and {@code StreamingWebExample}). The shared {@link Model} bean and MCP-loaded
+         * {@link Toolkit} are safe to reuse across agents; the Toolkit is shallow-copied at
+         * {@code build()} time so per-request mutation (if any) doesn't leak across requests.
          */
         private ReActAgent newRequestAgent() {
+            String toolsList =
+                    toolkit != null ? String.join(", ", toolkit.getToolNames()) : "(none)";
+            System.err.println("[DEBUG agent-build] toolkit=[" + toolsList + "]");
+            // BYPASS permission mode so MCP tools (which default to ASK on every non-read-only
+            // call — see McpTool#checkPermissions) execute without pausing for HITL confirmation.
+            // Acceptable here because this example only registers read-only navigation tools.
             return ReActAgent.builder()
-                    .name("WebAssistant")
-                    .sysPrompt("You are a helpful AI assistant. Be friendly and concise.")
+                    .name("NavigationAssistant")
+                    .sysPrompt(DEFAULT_SYSTEM_PROMPT)
                     .model(model)
-                    .toolkit(new Toolkit())
+                    .toolkit(toolkit != null ? toolkit : new Toolkit())
+                    .permissionContext(
+                            PermissionContextState.builder().mode(PermissionMode.BYPASS).build())
                     .middleware(new OtelTracingMiddleware())
                     .build();
         }
@@ -189,4 +267,27 @@ public class BasicChatExample {
                     .build();
         }
     }
+
+    /**
+     * Chinese navigation assistant prompt ported from the Python reference
+     * {@code /data/disk/agent-demo/navagent/agent.py:58-64}. It steers the LLM toward the
+     * navigation tools exposed by the AMap MCP server (registered at startup) and forbids it
+     * from answering navigation queries without calling a tool (which would just return a URL).
+     */
+    private static final String DEFAULT_SYSTEM_PROMPT =
+            "你是一个专业的出行助手,可以调用高德地图 MCP 工具为用户提供驾车/步行/骑行路线规划服务。\n"
+                    + "\n"
+                    + "重要规则：\n"
+                    + "1. 路径规划类工具(maps_direction_driving / maps_direction_walking /"
+                    + " maps_direction_bicycling)的 origin 和 destination 都必须是 \"经度,纬度\""
+                    + " 格式的字符串(逗号分隔,经度在前)。例如:121.4737,31.2304。\n"
+                    + "2. 调用工具前必须先向用户确认或索取起终点坐标。如果用户只给了地名"
+                    + "(如\"西直门地铁站\"、\"人民广场\")没有坐标,直接回复用户:"
+                    + "请提供起点和终点的经纬度坐标(格式:经度,纬度),因为当前服务不支持地址解析。"
+                    + "不要尝试调用工具——参数格式不对会失败。\n"
+                    + "3. 拿到工具返回的路线数据后,必须用人话总结给用户:包括距离、预计时间、途经主要道路等,"
+                    + "不能只贴原始 JSON。\n"
+                    + "4. 如果用户没指定出行方式,默认使用驾车(maps_direction_driving),"
+                    + "完成后可以问用户是否也想看步行或骑行方案。\n"
+                    + "5. 对于非导航类问题(闲聊、知识问答),正常回答,不要调用任何工具。";
 }
