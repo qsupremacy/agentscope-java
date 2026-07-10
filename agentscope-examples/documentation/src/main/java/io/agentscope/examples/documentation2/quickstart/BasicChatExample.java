@@ -28,7 +28,7 @@ import io.agentscope.core.tool.Toolkit;
 import io.agentscope.core.tool.mcp.McpClientBuilder;
 import io.agentscope.core.tool.mcp.McpClientWrapper;
 import io.agentscope.core.tracing.OtelTracingMiddleware;
-import io.agentscope.extensions.model.dashscope.DashScopeChatModel;
+import io.agentscope.extensions.model.openai.OpenAIChatModel;
 import org.springframework.beans.factory.InitializingBean;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
@@ -61,7 +61,7 @@ import reactor.core.scheduler.Schedulers;
  *       middleware produces the AgentScope business-layer spans</li>
  * </ul>
  *
- * <p>Spans produced: {@code invoke_agent NavigationAssistant}, {@code chat qwen-plus} (per model
+ * <p>Spans produced: {@code invoke_agent NavigationAssistant}, {@code chat gpt-4o-mini} (per model
  * call), {@code execute_tool maps_direction_driving} (per tool call), and HTTP client spans from
  * the Java Agent (including one for the MCP call to {@code mcp.amap.com}). All share the same
  * trace id via {@code GlobalOpenTelemetry}.
@@ -79,7 +79,9 @@ import reactor.core.scheduler.Schedulers;
  *     otel/opentelemetry-collector-contrib:0.114.0
  *
  *   # 2. Set the API keys and exporter endpoint (gRPC recommended)
- *   export DASHSCOPE_API_KEY=your_key
+ *   export OPENAI_API_KEY=your_key
+ *   export OPENAI_MODEL=gpt-4o-mini             # optional, defaults to gpt-4o-mini
+ *   export OPENAI_BASE_URL=https://...          # optional, defaults to public OpenAI endpoint
  *   export AMAP_API_KEY=your_amap_mcp_key      # from https://lbs.amap.com/ → MCP
  *   export OTEL_SERVICE_NAME=basic-chat-example
  *   export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317
@@ -118,14 +120,22 @@ public class BasicChatExample {
 
         @Override
         public void afterPropertiesSet() {
-            String apiKey = System.getenv("DASHSCOPE_API_KEY");
+            String apiKey = System.getenv("OPENAI_API_KEY");
             if (apiKey == null || apiKey.isBlank()) {
-                throw new IllegalStateException(
-                        "DASHSCOPE_API_KEY environment variable is required");
+                throw new IllegalStateException("OPENAI_API_KEY environment variable is required");
             }
-            this.model =
-                    DashScopeChatModel.builder().apiKey(apiKey).modelName("qwen-max").stream(true)
-                            .build();
+            String modelName = System.getenv().getOrDefault("OPENAI_MODEL", "gpt-4o-mini");
+            String baseUrl = System.getenv("OPENAI_BASE_URL");
+            OpenAIChatModel.Builder builder =
+                    OpenAIChatModel.builder().apiKey(apiKey).modelName(modelName).stream(true);
+            if (baseUrl != null && !baseUrl.isBlank()) {
+                // Point at any OpenAI-compatible gateway (e.g. MiniMax, Azure OpenAI, local vLLM).
+                // Unset to fall back to the public OpenAI endpoint.
+                builder.baseUrl(baseUrl);
+                System.out.println("OpenAI base URL: " + baseUrl);
+            }
+            this.model = builder.build();
+            System.out.println("OpenAI model: " + modelName);
 
             // AMap MCP server via Streamable HTTP (optional — app still works without it).
             // API key is sent as a query parameter; the MCP SDK's streamableHttpTransport uses the

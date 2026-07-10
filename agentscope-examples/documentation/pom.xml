@@ -70,10 +70,10 @@
             <artifactId>agentscope-harness</artifactId>
         </dependency>
 
-        <!-- DashScope model implementation and MultiModalTool -->
+        <!-- OpenAI model implementation (also serves any OpenAI-compatible API via baseUrl) -->
         <dependency>
             <groupId>io.agentscope</groupId>
-            <artifactId>agentscope-extensions-model-dashscope</artifactId>
+            <artifactId>agentscope-extensions-model-openai</artifactId>
         </dependency>
 
         <!-- RAG Extensions -->
