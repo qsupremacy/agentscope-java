@@ -289,7 +289,10 @@ public class BasicChatExample {
                     .permissionContext(
                             PermissionContextState.builder().mode(PermissionMode.BYPASS).build())
                     .skillRepository(skillRepository) // may be null if no skills loaded
+                    // OtelTracingMiddleware must come BEFORE ConversationIdMiddleware so the
+                    // latter runs inside the invoke_agent span's OTel context.
                     .middleware(new OtelTracingMiddleware())
+                    .middleware(new ConversationIdMiddleware())
                     .build();
         }
 
